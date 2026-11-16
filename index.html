@@ -115,6 +115,10 @@
   let silenceTimer = null;
   let sentCharOffsetByIndex = new Map();
 
+  // Einstellbare Schwellenwerte für den Schnellstart
+  const WORDS_PER_CHUNK = 4;   // Sendet bereits nach 4 neuen Wörtern
+  const SILENCE_DELAY_MS = 450; // Sendet nach 450 ms kurzer Sprechpause
+
   const MQTT_BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
   const myClientId = 'user-' + Math.random().toString(36).substring(2, 10);
 
@@ -125,11 +129,9 @@
     initReceiver(roomParam);
   }
 
-  // Hilfsfunktion: Bereinigt eingegebene Raum-IDs (ergänzt "kurs-" falls nur die Zeichen eingegeben wurden)
   function normalizeRoomId(rawInput) {
     let cleaned = rawInput.trim().toLowerCase();
     if (!cleaned) return '';
-    // Falls jemand aus Versehen eine ganze URL eingefügt hat, den ?room= Parameter herausziehen
     if (cleaned.includes('room=')) {
       const match = cleaned.match(/room=([a-z0-9-]+)/);
       if (match && match[1]) cleaned = match[1];
@@ -217,7 +219,7 @@
   }
 
   // ==========================================
-  // 3. KURSLEITER (SENDER) ÜBER MQTT
+  // 3. KURSLEITER (SENDER) MIT SCHNELLSTART
   // ==========================================
   function initSender() {
     isReceiverMode = false;
@@ -366,7 +368,8 @@
       const unsentPart = currentTranscript.slice(alreadySentLen).trim();
       const newWords = unsentPart ? unsentPart.split(/\s+/) : [];
 
-      if (newWords.length >= 10) {
+      // Sobald WORDS_PER_CHUNK (4 Wörter) erreicht sind, sofort absenden
+      if (newWords.length >= WORDS_PER_CHUNK) {
         const lastSpaceIndex = currentTranscript.lastIndexOf(' ');
         if (lastSpaceIndex > alreadySentLen) {
           const safeSlice = currentTranscript.slice(0, lastSpaceIndex);
@@ -375,11 +378,12 @@
         return;
       }
 
+      // Bei kurzer Sprechpause (450 ms) sofort abschicken
       silenceTimer = setTimeout(() => {
         if (unsentPart.length > 1) {
           processDelta(resIdx, currentTranscript, false);
         }
-      }, 1100);
+      }, SILENCE_DELAY_MS);
     };
 
     recognition.onend = () => {
@@ -436,7 +440,18 @@
     }
   }
 
+  // Schnellerer Google GTX Endpunkt zuerst (ca. 120 ms), MyMemory als Fallback
   async function translateText(text) {
+    try {
+      const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=de&tl=it&dt=t&q=${encodeURIComponent(text)}`;
+      const gtxResponse = await fetch(gtxUrl);
+      if (gtxResponse.ok) {
+        const gtxData = await gtxResponse.json();
+        const result = gtxData[0].map(item => item[0]).join('');
+        if (result) return result;
+      }
+    } catch (e) {}
+
     try {
       const mmUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=de|it`;
       const mmResponse = await fetch(mmUrl);
@@ -448,15 +463,6 @@
             return translated;
           }
         }
-      }
-    } catch (e) {}
-
-    try {
-      const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=de&tl=it&dt=t&q=${encodeURIComponent(text)}`;
-      const gtxResponse = await fetch(gtxUrl);
-      if (gtxResponse.ok) {
-        const gtxData = await gtxResponse.json();
-        return gtxData[0].map(item => item[0]).join('');
       }
     } catch (e) {}
 
@@ -533,7 +539,6 @@
     });
   }
 
-  // Verbindet den Schüler (wahlweise mit neu eingegebener Raum-ID oder aktueller ID) neu
   function reconnectWithNewRoomId() {
     const inputEl = document.getElementById('new-room-id-input');
     const enteredRoom = normalizeRoomId(inputEl.value);
@@ -542,7 +547,6 @@
       activeRoomId = enteredRoom;
       roomTopic = `live-kurs-uebersetzer/${activeRoomId}`;
 
-      // URL im Browser aktualisieren, damit bei F5 der neue Raum erhalten bleibt
       const newUrl = `${window.location.pathname}?room=${encodeURIComponent(activeRoomId)}`;
       window.history.replaceState({}, '', newUrl);
 
@@ -580,7 +584,7 @@
   function speakItalian(text) {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'it-IT';
-    utterance.rate = 1.12;
+    utterance.rate = 1.2;
     window.speechSynthesis.speak(utterance);
   }
 </script>
