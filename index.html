@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Kurs Live-Übersetzer (DE → IT)</title>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { margin: 0; padding: 20px; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+    .container { width: 100%; max-width: 500px; background: #1e293b; padding: 24px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+    h1 { font-size: 1.4rem; margin-top: 0; text-align: center; color: #38bdf8; }
+    .btn { width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 1.1rem; font-weight: bold; cursor: pointer; margin-top: 12px; transition: 0.2s; }
+    .btn-primary { background: #0284c7; color: white; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-success { background: #16a34a; color: white; }
+    .hidden { display: none !important; }
+    #qrcode { background: white; padding: 16px; border-radius: 12px; display: inline-block; margin: 16px auto; }
+    .qr-wrapper { text-align: center; }
+    .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; background: #334155; margin: 4px; }
+    .status-active { background: #15803d; color: #dcfce7; }
+    .status-warn { background: #b45309; color: #fef3c7; }
+    .text-box { background: #0f172a; padding: 16px; border-radius: 12px; min-height: 120px; margin-top: 12px; font-size: 1.15rem; line-height: 1.5; border: 1px solid #334155; }
+    .text-label { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 16px; }
+    .hint { font-size: 0.85rem; color: #94a3b8; text-align: center; margin-top: 12px; }
+    select { width: 100%; padding: 10px; border-radius: 8px; background: #0f172a; color: #f8fafc; border: 1px solid #334155; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>🎙️ Kurs Live-Übersetzer</h1>
+
+  <!-- STARTANSICHT -->
+  <div id="view-start">
+    <p class="hint">Wählen Sie Ihre Rolle für den Kurs:</p>
+    <button class="btn btn-primary" onclick="initSender()">Ich bin der Kursleiter (Deutsch sprechen)</button>
+    <div style="margin-top: 24px; border-top: 1px solid #334155; padding-top: 16px;">
+      <p class="hint">Schüler scannen einfach den QR-Code vom Bildschirm des Kursleiters.</p>
+    </div>
+  </div>
+
+  <!-- KURSLEITER-ANSICHT (SENDER) -->
+  <div id="view-sender" class="hidden">
+    <div style="text-align: center;">
+      <span id="sender-status" class="status-badge">Erstelle Raum...</span>
+      <span id="connected-count" class="status-badge">Schüler: 0</span>
+    </div>
+
+    <div class="qr-wrapper">
+      <div id="qrcode"></div>
+      <p id="room-code-display" class="hint" style="margin-top: 0; font-family: monospace;"></p>
+    </div>
+
+    <!-- Mikrofon-Auswahl (Bluetooth wird automatisch priorisiert) -->
+    <div style="margin-top: 12px;">
+      <label for="mic-select" class="text-label" style="display:block; margin-bottom: 6px;">Aktives Mikrofon:</label>
+      <select id="mic-select">
+        <option value="">Suche Mikrofone...</option>
+      </select>
+    </div>
+
+    <button id="btn-mic" class="btn btn-success" onclick="toggleMic()">🎤 Mikrofon starten</button>
+
+    <div class="text-label">Erkanntes Deutsch:</div>
+    <div id="sender-de" class="text-box" style="min-height: 70px; color: #cbd5e1;">...</div>
+
+    <div class="text-label">Gesendetes Italienisch:</div>
+    <div id="sender-it" class="text-box" style="min-height: 70px; color: #38bdf8;">...</div>
+  </div>
+
+  <!-- SCHÜLER-ANSICHT (EMPFÄNGER) -->
+  <div id="view-receiver" class="hidden">
+    <div style="text-align: center;">
+      <span id="receiver-status" class="status-badge status-warn">Suche Kursleiter...</span>
+    </div>
+
+    <button id="btn-unlock-audio" class="btn btn-success" onclick="unlockReceiverAudio()">🔊 Ton & Kopfhörer aktivieren</button>
+
+    <div id="receiver-content" class="hidden">
+      <div class="text-label">Italienische Übersetzung (Live):</div>
+      <div id="receiver-it" class="text-box" style="font-size: 1.4rem; color: #ffffff;">Warte auf Kursleiter...</div>
+
+      <div class="text-label">Original (Deutsch):</div>
+      <div id="receiver-de" class="text-box" style="min-height: 60px; font-size: 0.95rem; color: #94a3b8;">...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let peer = null;
+  let connections = new Map();
+  let recognition = null;
+  let isRecording = false;
+  let wakeLock = null;
+  let audioUnlocked = false;
+  let activeAudioStream = null;
+
+  // Stabile STUN-Server für WLAN + 4G/5G Verbindungen
+  const peerConfig = {
+    debug: 1,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' }
+      ]
+    }
+  };
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const roomParam = urlParams.get('room');
+
+  if (roomParam) {
+    initReceiver(roomParam);
+  }
+
+  // ==========================================
+  // 1. WAKE LOCK (Bildschirm wach halten)
+  // ==========================================
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch (err) {
+      console.warn('Wake Lock nicht verfügbar:', err);
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (wakeLock !== null && document.visibilityState === 'visible') {
+      requestWakeLock();
+    }
+  });
+
+  // ==========================================
+  // 2. MIKROFON-AUSWAHL (BLUETOOTH PRIORISIEREN)
+  // ==========================================
+  async function loadAndSelectBestMicrophone() {
+    const selectEl = document.getElementById('mic-select');
+    try {
+      // Kurz Berechtigung anfragen, damit Gerätenamen sichtbar werden
+      const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      tempStream.getTracks().forEach(track => track.stop());
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(device => device.kind === 'audioinput');
+
+      selectEl.innerHTML = '';
+      if (audioInputs.length === 0) {
+        selectEl.innerHTML = '<option value="">Kein Mikrofon gefunden</option>';
+        return;
+      }
+
+      const btKeywords = ['shokz', 'bluetooth', 'headset', 'hands-free', 'airpods', 'buds', 'wireless', 'external'];
+      let preferredDeviceId = '';
+
+      audioInputs.forEach((device, index) => {
+        const label = device.label || `Mikrofon ${index + 1}`;
+        const option = document.createElement('option');
+        option.value = device.deviceId;
+        option.textContent = label;
+        selectEl.appendChild(option);
+
+        const lowerLabel = label.toLowerCase();
+        if (!preferredDeviceId && btKeywords.some(kw => lowerLabel.includes(kw))) {
+          preferredDeviceId = device.deviceId;
+        }
+      });
+
+      if (preferredDeviceId) {
+        selectEl.value = preferredDeviceId;
+      } else {
+        selectEl.value = audioInputs[0].deviceId;
+      }
+    } catch (err) {
+      console.warn('Mikrofon-Abfrage eingeschränkt:', err);
+      selectEl.innerHTML = '<option value="">Standard-Mikrofon (Systemwahl)</option>';
+    }
+  }
+
+  if (navigator.mediaDevices) {
+    navigator.mediaDevices.ondevicechange = () => {
+      loadAndSelectBestMicrophone();
+    };
+  }
+
+  // ==========================================
+  // 3. KURSLEITER (SENDER) LOGIK
+  // ==========================================
+  function initSender() {
+    document.getElementById('view-start').classList.add('hidden');
+    document.getElementById('view-sender').classList.remove('hidden');
+    requestWakeLock();
+
+    const roomId = 'kurs-' + Math.random().toString(36).substring(2, 8);
+    peer = new Peer(roomId, peerConfig);
+
+    peer.on('open', (id) => {
+      const statusEl = document.getElementById('sender-status');
+      statusEl.textContent = 'Raum aktiv';
+      statusEl.classList.add('status-active');
+      document.getElementById('room-code-display').textContent = 'Raum-ID: ' + id;
+
+      const joinUrl = `${window.location.origin}${window.location.pathname}?room=${id}`;
+      new QRCode(document.getElementById('qrcode'), {
+        text: joinUrl,
+        width: 180,
+        height: 180
+      });
+    });
+
+    peer.on('connection', (conn) => {
+      conn.on('open', () => {
+        connections.set(conn.peer, conn);
+        updateStudentCount();
+        conn.send({ type: 'welcome', de: 'Verbunden!', it: 'Connesso con successo!' });
+      });
+
+      conn.on('data', (data) => {
+        if (data && data.type === 'ping') {
+          connections.set(conn.peer, conn);
+          updateStudentCount();
+        }
+      });
+
+      conn.on('close', () => {
+        connections.delete(conn.peer);
+        updateStudentCount();
+      });
+
+      conn.on('error', () => {
+        connections.delete(conn.peer);
+        updateStudentCount();
+      });
+    });
+
+    setInterval(() => {
+      for (let [peerId, conn] of connections.entries()) {
+        if (!conn.open) {
+          connections.delete(peerId);
+        }
+      }
+      updateStudentCount();
+    }, 5000);
+
+    setupSpeechRecognition();
+    loadAndSelectBestMicrophone();
+  }
+
+  function updateStudentCount() {
+    const countEl = document.getElementById('connected-count');
+    const count = connections.size;
+    countEl.textContent = `Schüler: ${count}`;
+    if (count > 0) {
+      countEl.classList.add('status-active');
+    } else {
+      countEl.classList.remove('status-active');
+    }
+  }
+
+  function setupSpeechRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Ihr Browser unterstützt keine Spracherkennung. Bitte Chrome (Android) oder Safari (iOS) nutzen.');
+      return;
+    }
+
+    recognition = new SpeechRecognition();
+    recognition.lang = 'de-DE';
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = async (event) => {
+      let interimTranscript = '';
+      let finalTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          interimTranscript += event.results[i][0].transcript;
+        }
+      }
+
+      document.getElementById('sender-de').textContent = finalTranscript || interimTranscript;
+
+      if (finalTranscript.trim().length > 0) {
+        const italianText = await translateText(finalTranscript.trim());
+        document.getElementById('sender-it').textContent = italianText;
+        broadcastToStudents({ type: 'translation', de: finalTranscript.trim(), it: italianText });
+      }
+    };
+
+    recognition.onend = () => {
+      if (isRecording) {
+        try { recognition.start(); } catch (e) {}
+      }
+    };
+  }
+
+  async function toggleMic() {
+    const btn = document.getElementById('btn-mic');
+    const selectedDeviceId = document.getElementById('mic-select').value;
+
+    if (!isRecording) {
+      try {
+        if (activeAudioStream) {
+          activeAudioStream.getTracks().forEach(track => track.stop());
+        }
+
+        // 1. Versuch: Gewähltes Bluetooth-Mikrofon erzwingen
+        if (selectedDeviceId) {
+          try {
+            activeAudioStream = await navigator.mediaDevices.getUserMedia({
+              audio: { deviceId: { exact: selectedDeviceId } }
+            });
+          } catch (btError) {
+            // 2. Fallback: Beliebiges verfügbares Mikrofon nutzen
+            console.warn('Gewähltes Mikrofon nicht erreichbar, nutze Fallback:', btError);
+            activeAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          }
+        } else {
+          activeAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+
+        recognition.start();
+        isRecording = true;
+        btn.textContent = '⏹️ Mikrofon stoppen (Läuft...)';
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-danger');
+        requestWakeLock();
+      } catch (err) {
+        alert('Kein Zugriff auf ein Mikrofon möglich. Bitte Berechtigung im Browser prüfen.');
+      }
+    } else {
+      isRecording = false;
+      recognition.stop();
+      if (activeAudioStream) {
+        activeAudioStream.getTracks().forEach(track => track.stop());
+        activeAudioStream = null;
+      }
+      btn.textContent = '🎤 Mikrofon starten';
+      btn.classList.remove('btn-danger');
+      btn.classList.add('btn-success');
+    }
+  }
+
+  async function translateText(text) {
+    try {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=de&tl=it&dt=t&q=${encodeURIComponent(text)}`;
+      const response = await fetch(url);
+      const data = await response.json();
+      return data[0].map(item => item[0]).join('');
+    } catch (error) {
+      return '[Übersetzungsfehler] ' + text;
+    }
+  }
+
+  function broadcastToStudents(payload) {
+    for (let conn of connections.values()) {
+      if (conn.open) {
+        conn.send(payload);
+      }
+    }
+  }
+
+  // ==========================================
+  // 4. SCHÜLER (EMPFÄNGER) LOGIK
+  // ==========================================
+  function initReceiver(hostRoomId) {
+    document.getElementById('view-start').classList.add('hidden');
+    document.getElementById('view-receiver').classList.remove('hidden');
+
+    peer = new Peer(peerConfig);
+
+    peer.on('open', () => {
+      connectToHost(hostRoomId);
+    });
+  }
+
+  function connectToHost(hostRoomId) {
+    const statusEl = document.getElementById('receiver-status');
+    statusEl.textContent = 'Verbinde mit Kursleiter...';
+    statusEl.className = 'status-badge status-warn';
+
+    const conn = peer.connect(hostRoomId, { reliable: true });
+
+    conn.on('open', () => {
+      statusEl.textContent = '✅ Mit Kursleiter verbunden';
+      statusEl.className = 'status-badge status-active';
+
+      const pingInterval = setInterval(() => {
+        if (conn.open) {
+          conn.send({ type: 'ping' });
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 4000);
+    });
+
+    conn.on('data', (data) => {
+      if (data.type === 'welcome') {
+        document.getElementById('receiver-it').textContent = data.it;
+        document.getElementById('receiver-de').textContent = data.de;
+      } else if (data.type === 'translation') {
+        document.getElementById('receiver-it').textContent = data.it;
+        document.getElementById('receiver-de').textContent = data.de;
+        if (audioUnlocked) {
+          speakItalian(data.it);
+        }
+      }
+    });
+
+    conn.on('close', () => {
+      statusEl.textContent = '⚠️ Verbindung unterbrochen – verbinde neu...';
+      statusEl.className = 'status-badge status-warn';
+      setTimeout(() => connectToHost(hostRoomId), 3000);
+    });
+
+    conn.on('error', () => {
+      statusEl.textContent = '⚠️ Verbindungsfehler – neuer Versuch...';
+      statusEl.className = 'status-badge status-warn';
+      setTimeout(() => connectToHost(hostRoomId), 3000);
+    });
+  }
+
+  function unlockReceiverAudio() {
+    requestWakeLock();
+    audioUnlocked = true;
+
+    const utterance = new SpeechSynthesisUtterance('Audio attivato');
+    utterance.lang = 'it-IT';
+    window.speechSynthesis.speak(utterance);
+
+    document.getElementById('btn-unlock-audio').classList.add('hidden');
+    document.getElementById('receiver-content').classList.remove('hidden');
+  }
+
+  function speakItalian(text) {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'it-IT';
+    utterance.rate = 1.05;
+    window.speechSynthesis.speak(utterance);
+  }
+</script>
+
+</body>
+</html>
