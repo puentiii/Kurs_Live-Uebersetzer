@@ -26,7 +26,9 @@
     .text-box { background: #0f172a; padding: 16px; border-radius: 12px; min-height: 120px; margin-top: 12px; font-size: 1.15rem; line-height: 1.5; border: 1px solid #334155; }
     .text-label { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 16px; }
     .hint { font-size: 0.85rem; color: #94a3b8; text-align: center; margin-top: 12px; }
-    select { width: 100%; padding: 10px; border-radius: 8px; background: #0f172a; color: #f8fafc; border: 1px solid #334155; font-size: 0.95rem; }
+    select, input[type="text"] { width: 100%; padding: 12px; border-radius: 8px; background: #0f172a; color: #f8fafc; border: 1px solid #334155; font-size: 1rem; }
+    input[type="text"]:focus { outline: none; border-color: #38bdf8; }
+    .reconnect-box { margin-top: 24px; padding-top: 16px; border-top: 1px solid #334155; }
   </style>
 </head>
 <body>
@@ -39,7 +41,9 @@
     <p class="hint">Wählen Sie Ihre Rolle für den Kurs:</p>
     <button class="btn btn-primary" onclick="initSender()">Ich bin der Kursleiter (Deutsch sprechen)</button>
     <div style="margin-top: 24px; border-top: 1px solid #334155; padding-top: 16px;">
-      <p class="hint">Schüler scannen einfach den QR-Code vom Bildschirm des Kursleiters.</p>
+      <p class="hint">Schüler scannen einfach den QR-Code vom Bildschirm des Kursleiters oder geben eine Raum-ID ein:</p>
+      <input type="text" id="start-room-input" placeholder="z. B. kurs-a1b2c3" style="margin-top: 8px; text-align: center; font-family: monospace;">
+      <button class="btn btn-secondary" onclick="joinFromStartInput()">Als Schüler diesem Raum beitreten</button>
     </div>
   </div>
 
@@ -52,7 +56,7 @@
 
     <div class="qr-wrapper">
       <div id="qrcode"></div>
-      <p id="room-code-display" class="hint" style="margin-top: 0; font-family: monospace;"></p>
+      <p id="room-code-display" style="margin: 4px 0 0 0; font-family: monospace; font-size: 1.15rem; font-weight: bold; color: #38bdf8;"></p>
     </div>
 
     <div style="margin-top: 12px;">
@@ -75,6 +79,7 @@
   <div id="view-receiver" class="hidden">
     <div style="text-align: center;">
       <span id="receiver-status" class="status-badge status-warn">Verbinde...</span>
+      <div id="receiver-current-room" style="font-family: monospace; font-size: 0.85rem; color: #94a3b8; margin-top: 4px;"></div>
     </div>
 
     <button id="btn-unlock-audio" class="btn btn-success" onclick="unlockReceiverAudio()">🔊 Ton & Kopfhörer aktivieren</button>
@@ -85,8 +90,13 @@
 
       <div class="text-label">Original (Deutsch):</div>
       <div id="receiver-de" class="text-box" style="min-height: 60px; font-size: 0.95rem; color: #94a3b8;">...</div>
+    </div>
 
-      <button class="btn btn-secondary" onclick="manualReconnect()">🔄 Verbindung neu aufbauen</button>
+    <!-- Bereich zum Neuverbinden / Eingeben einer neuen Raum-ID -->
+    <div class="reconnect-box">
+      <label for="new-room-id-input" class="text-label" style="display:block; margin-top: 0; margin-bottom: 6px;">Kursleiter neu geladen? Neue Raum-ID eingeben:</label>
+      <input type="text" id="new-room-id-input" placeholder="kurs-xxxxxx" style="font-family: monospace; text-align: center;">
+      <button class="btn btn-secondary" onclick="reconnectWithNewRoomId()">🔄 Neu verbinden</button>
     </div>
   </div>
 </div>
@@ -94,7 +104,9 @@
 <script>
   let mqttClient = null;
   let roomTopic = '';
-  let studentLastSeen = new Map(); // Speichert aktive Schüler anhand ihrer Client-ID
+  let activeRoomId = '';
+  let isReceiverMode = false;
+  let studentLastSeen = new Map();
   let recognition = null;
   let isRecording = false;
   let wakeLock = null;
@@ -103,7 +115,6 @@
   let silenceTimer = null;
   let sentCharOffsetByIndex = new Map();
 
-  // Öffentlicher, sicherer MQTT-Broker über WSS (läuft über Port 8084 in jedem WLAN & 4G/5G)
   const MQTT_BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
   const myClientId = 'user-' + Math.random().toString(36).substring(2, 10);
 
@@ -112,6 +123,33 @@
 
   if (roomParam) {
     initReceiver(roomParam);
+  }
+
+  // Hilfsfunktion: Bereinigt eingegebene Raum-IDs (ergänzt "kurs-" falls nur die Zeichen eingegeben wurden)
+  function normalizeRoomId(rawInput) {
+    let cleaned = rawInput.trim().toLowerCase();
+    if (!cleaned) return '';
+    // Falls jemand aus Versehen eine ganze URL eingefügt hat, den ?room= Parameter herausziehen
+    if (cleaned.includes('room=')) {
+      const match = cleaned.match(/room=([a-z0-9-]+)/);
+      if (match && match[1]) cleaned = match[1];
+    }
+    if (!cleaned.startsWith('kurs-')) {
+      cleaned = 'kurs-' + cleaned;
+    }
+    return cleaned;
+  }
+
+  function joinFromStartInput() {
+    const inputVal = document.getElementById('start-room-input').value;
+    const targetRoom = normalizeRoomId(inputVal);
+    if (!targetRoom) {
+      alert('Bitte eine gültige Raum-ID eingeben (z. B. kurs-a1b2c3).');
+      return;
+    }
+    const newUrl = `${window.location.pathname}?room=${encodeURIComponent(targetRoom)}`;
+    window.history.replaceState({}, '', newUrl);
+    initReceiver(targetRoom);
   }
 
   // ==========================================
@@ -182,14 +220,15 @@
   // 3. KURSLEITER (SENDER) ÜBER MQTT
   // ==========================================
   function initSender() {
+    isReceiverMode = false;
     document.getElementById('view-start').classList.add('hidden');
     document.getElementById('view-sender').classList.remove('hidden');
     requestWakeLock();
 
     const roomId = 'kurs-' + Math.random().toString(36).substring(2, 8);
+    activeRoomId = roomId;
     roomTopic = `live-kurs-uebersetzer/${roomId}`;
 
-    // QR-Code sofort generieren
     const joinUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
     document.getElementById('room-code-display').textContent = 'Raum-ID: ' + roomId;
     new QRCode(document.getElementById('qrcode'), {
@@ -206,10 +245,9 @@
 
     mqttClient.on('connect', () => {
       const statusEl = document.getElementById('sender-status');
-      statusEl.textContent = '✅ Raum online (WLAN & 4G/5G)';
+      statusEl.textContent = '✅ Raum online';
       statusEl.className = 'status-badge status-active';
 
-      // Auf Schüler-Rückmeldungen lauschen
       mqttClient.subscribe(`${roomTopic}/presence`);
     });
 
@@ -228,7 +266,6 @@
             studentLastSeen.set(data.studentId, Date.now());
             updateStudentCount();
 
-            // Neuen Schüler sofort begrüßen
             if (isNew) {
               broadcastToStudents({ type: 'welcome', de: 'Verbunden!', it: 'Connesso!' });
             }
@@ -237,7 +274,6 @@
       }
     });
 
-    // Inaktive Schüler (älter als 10 Sek. ohne Signal) aus Zähler entfernen
     setInterval(() => {
       const now = Date.now();
       for (let [id, lastTime] of studentLastSeen.entries()) {
@@ -431,9 +467,14 @@
   // 4. SCHÜLER (EMPFÄNGER) ÜBER MQTT
   // ==========================================
   function initReceiver(hostRoomId) {
-    roomTopic = `live-kurs-uebersetzer/${hostRoomId}`;
+    isReceiverMode = true;
+    activeRoomId = normalizeRoomId(hostRoomId);
+    roomTopic = `live-kurs-uebersetzer/${activeRoomId}`;
+
     document.getElementById('view-start').classList.add('hidden');
     document.getElementById('view-receiver').classList.remove('hidden');
+    document.getElementById('receiver-current-room').textContent = `Aktueller Raum: ${activeRoomId}`;
+    document.getElementById('new-room-id-input').value = activeRoomId;
 
     connectReceiverMqtt();
   }
@@ -458,8 +499,6 @@
       statusEl.className = 'status-badge status-active';
 
       mqttClient.subscribe(`${roomTopic}/stream`);
-
-      // Sofort Präsenz melden und alle 4 Sekunden wiederholen
       sendPresence();
     });
 
@@ -494,19 +533,37 @@
     });
   }
 
+  // Verbindet den Schüler (wahlweise mit neu eingegebener Raum-ID oder aktueller ID) neu
+  function reconnectWithNewRoomId() {
+    const inputEl = document.getElementById('new-room-id-input');
+    const enteredRoom = normalizeRoomId(inputEl.value);
+
+    if (enteredRoom && enteredRoom !== activeRoomId) {
+      activeRoomId = enteredRoom;
+      roomTopic = `live-kurs-uebersetzer/${activeRoomId}`;
+
+      // URL im Browser aktualisieren, damit bei F5 der neue Raum erhalten bleibt
+      const newUrl = `${window.location.pathname}?room=${encodeURIComponent(activeRoomId)}`;
+      window.history.replaceState({}, '', newUrl);
+
+      document.getElementById('receiver-current-room').textContent = `Aktueller Raum: ${activeRoomId}`;
+      document.getElementById('receiver-it').textContent = 'Warte auf Kursleiter...';
+      document.getElementById('receiver-de').textContent = '...';
+    }
+
+    inputEl.value = activeRoomId;
+    connectReceiverMqtt();
+  }
+
   function sendPresence() {
-    if (mqttClient && mqttClient.connected) {
+    if (mqttClient && mqttClient.connected && roomTopic) {
       mqttClient.publish(`${roomTopic}/presence`, JSON.stringify({ studentId: myClientId }));
     }
   }
 
   setInterval(() => {
-    if (roomParam) sendPresence();
+    if (isReceiverMode) sendPresence();
   }, 4000);
-
-  function manualReconnect() {
-    connectReceiverMqtt();
-  }
 
   function unlockReceiverAudio() {
     requestWakeLock();
