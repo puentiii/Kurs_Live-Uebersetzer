@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Kurs Live-Übersetzer (DE → IT)</title>
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- MQTT.js für netzwerkübergreifende Echtzeit-Verbindung (WLAN + 4G/5G) -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -45,7 +46,7 @@
   <!-- KURSLEITER-ANSICHT (SENDER) -->
   <div id="view-sender" class="hidden">
     <div style="text-align: center;">
-      <span id="sender-status" class="status-badge status-warn">Erstelle Raum...</span>
+      <span id="sender-status" class="status-badge status-warn">Verbinde Server...</span>
       <span id="connected-count" class="status-badge">Schüler: 0</span>
     </div>
 
@@ -73,7 +74,7 @@
   <!-- SCHÜLER-ANSICHT (EMPFÄNGER) -->
   <div id="view-receiver" class="hidden">
     <div style="text-align: center;">
-      <span id="receiver-status" class="status-badge status-warn">Suche Kursleiter...</span>
+      <span id="receiver-status" class="status-badge status-warn">Verbinde...</span>
     </div>
 
     <button id="btn-unlock-audio" class="btn btn-success" onclick="unlockReceiverAudio()">🔊 Ton & Kopfhörer aktivieren</button>
@@ -91,33 +92,20 @@
 </div>
 
 <script>
-  let peer = null;
-  let connections = new Map();
+  let mqttClient = null;
+  let roomTopic = '';
+  let studentLastSeen = new Map(); // Speichert aktive Schüler anhand ihrer Client-ID
   let recognition = null;
   let isRecording = false;
   let wakeLock = null;
   let audioUnlocked = false;
   let activeAudioStream = null;
-
   let silenceTimer = null;
-  let currentHostId = null;
-  let currentConn = null;
-  let reconnectTimer = null;
-
-  // Merkt sich pro SpeechRecognition-Index, wie viele Zeichen bereits übersetzt/gesendet wurden
   let sentCharOffsetByIndex = new Map();
 
-  const peerConfig = {
-    debug: 0,
-    config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' }
-      ]
-    }
-  };
+  // Öffentlicher, sicherer MQTT-Broker über WSS (läuft über Port 8084 in jedem WLAN & 4G/5G)
+  const MQTT_BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';
+  const myClientId = 'user-' + Math.random().toString(36).substring(2, 10);
 
   const urlParams = new URLSearchParams(window.location.search);
   const roomParam = urlParams.get('room');
@@ -127,7 +115,7 @@
   }
 
   // ==========================================
-  // 1. WAKE LOCK
+  // 1. WAKE LOCK (Bildschirm wach halten)
   // ==========================================
   async function requestWakeLock() {
     try {
@@ -140,8 +128,8 @@
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
       requestWakeLock();
-      if (peer && peer.disconnected && !peer.destroyed) {
-        peer.reconnect();
+      if (mqttClient && !mqttClient.connected) {
+        mqttClient.reconnect();
       }
     }
   });
@@ -191,7 +179,7 @@
   }
 
   // ==========================================
-  // 3. KURSLEITER (SENDER) MIT DELTA-STREAMING
+  // 3. KURSLEITER (SENDER) ÜBER MQTT
   // ==========================================
   function initSender() {
     document.getElementById('view-start').classList.add('hidden');
@@ -199,111 +187,99 @@
     requestWakeLock();
 
     const roomId = 'kurs-' + Math.random().toString(36).substring(2, 8);
-    createSenderPeer(roomId, true);
+    roomTopic = `live-kurs-uebersetzer/${roomId}`;
+
+    // QR-Code sofort generieren
+    const joinUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    document.getElementById('room-code-display').textContent = 'Raum-ID: ' + roomId;
+    new QRCode(document.getElementById('qrcode'), {
+      text: joinUrl,
+      width: 180,
+      height: 180
+    });
+
+    mqttClient = mqtt.connect(MQTT_BROKER_URL, {
+      clientId: myClientId,
+      clean: true,
+      reconnectPeriod: 2000
+    });
+
+    mqttClient.on('connect', () => {
+      const statusEl = document.getElementById('sender-status');
+      statusEl.textContent = '✅ Raum online (WLAN & 4G/5G)';
+      statusEl.className = 'status-badge status-active';
+
+      // Auf Schüler-Rückmeldungen lauschen
+      mqttClient.subscribe(`${roomTopic}/presence`);
+    });
+
+    mqttClient.on('reconnect', () => {
+      const statusEl = document.getElementById('sender-status');
+      statusEl.textContent = 'Verbinde neu...';
+      statusEl.className = 'status-badge status-warn';
+    });
+
+    mqttClient.on('message', (topic, message) => {
+      if (topic === `${roomTopic}/presence`) {
+        try {
+          const data = JSON.parse(message.toString());
+          if (data.studentId) {
+            const isNew = !studentLastSeen.has(data.studentId);
+            studentLastSeen.set(data.studentId, Date.now());
+            updateStudentCount();
+
+            // Neuen Schüler sofort begrüßen
+            if (isNew) {
+              broadcastToStudents({ type: 'welcome', de: 'Verbunden!', it: 'Connesso!' });
+            }
+          }
+        } catch (e) {}
+      }
+    });
+
+    // Inaktive Schüler (älter als 10 Sek. ohne Signal) aus Zähler entfernen
+    setInterval(() => {
+      const now = Date.now();
+      for (let [id, lastTime] of studentLastSeen.entries()) {
+        if (now - lastTime > 10000) {
+          studentLastSeen.delete(id);
+        }
+      }
+      updateStudentCount();
+    }, 3000);
 
     setupSpeechRecognition();
     loadAndSelectBestMicrophone();
   }
 
-  function createSenderPeer(roomId, generateQr) {
-    peer = new Peer(roomId, peerConfig);
-
-    peer.on('open', (id) => {
-      const statusEl = document.getElementById('sender-status');
-      statusEl.textContent = 'Raum aktiv';
-      statusEl.className = 'status-badge status-active';
-      document.getElementById('room-code-display').textContent = 'Raum-ID: ' + id;
-
-      if (generateQr) {
-        const qrContainer = document.getElementById('qrcode');
-        qrContainer.innerHTML = '';
-        const joinUrl = `${window.location.origin}${window.location.pathname}?room=${id}`;
-        new QRCode(qrContainer, {
-          text: joinUrl,
-          width: 180,
-          height: 180
-        });
-      }
-    });
-
-    peer.on('disconnected', () => {
-      const statusEl = document.getElementById('sender-status');
-      statusEl.textContent = 'Verbinde Raum neu...';
-      statusEl.className = 'status-badge status-warn';
-      setTimeout(() => {
-        if (peer && !peer.destroyed) peer.reconnect();
-      }, 1500);
-    });
-
-    peer.on('error', (err) => {
-      if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
-        setTimeout(() => {
-          if (peer && !peer.destroyed) peer.reconnect();
-        }, 2000);
-      }
-    });
-
-    peer.on('connection', (conn) => {
-      conn.on('open', () => {
-        connections.set(conn.peer, conn);
-        updateStudentCount();
-        conn.send({ type: 'welcome', de: 'Verbunden!', it: 'Connesso!' });
-      });
-
-      conn.on('data', (data) => {
-        if (data && data.type === 'ping') {
-          connections.set(conn.peer, conn);
-          updateStudentCount();
-        }
-      });
-
-      conn.on('close', () => {
-        connections.delete(conn.peer);
-        updateStudentCount();
-      });
-
-      conn.on('error', () => {
-        connections.delete(conn.peer);
-        updateStudentCount();
-      });
-    });
-
-    setInterval(() => {
-      for (let [peerId, conn] of connections.entries()) {
-        if (!conn.open) connections.delete(peerId);
-      }
-      updateStudentCount();
-    }, 5000);
-  }
-
   function updateStudentCount() {
     const countEl = document.getElementById('connected-count');
-    const count = connections.size;
+    const count = studentLastSeen.size;
     countEl.textContent = `Schüler: ${count}`;
     countEl.classList.toggle('status-active', count > 0);
   }
 
-  // Extrahiert nur den NEU hinzugekommenen Teil eines laufenden Satzes
+  function broadcastToStudents(payload) {
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(`${roomTopic}/stream`, JSON.stringify(payload), { qos: 0 });
+    }
+  }
+
   async function processDelta(resultIndex, fullText, isFinal) {
     const alreadySentLen = sentCharOffsetByIndex.get(resultIndex) || 0;
 
-    // Falls der Browser den Text rückwirkend leicht korrigiert hat und kürzer wurde
     if (fullText.length <= alreadySentLen) {
       if (isFinal) sentCharOffsetByIndex.delete(resultIndex);
       return;
     }
 
-    // Nur den noch nicht gesendeten Rest abschneiden
     let newChunk = fullText.slice(alreadySentLen).trim();
-
-    // Wenn es nur noch ein einzelnes Satzzeichen am Ende ist (z. B. "."), ignorieren
     const cleanCheck = newChunk.replace(/[.,!?;:"'„“\-–—\s]+/g, '');
     if (!cleanCheck) {
       if (isFinal) sentCharOffsetByIndex.delete(resultIndex);
       return;
     }
 
-    // Sofort neuen Offset speichern, damit dieser Teil kein zweites Mal gesendet wird
     sentCharOffsetByIndex.set(resultIndex, fullText.length);
     if (isFinal) {
       sentCharOffsetByIndex.delete(resultIndex);
@@ -345,20 +321,16 @@
 
       document.getElementById('sender-de').textContent = currentTranscript;
 
-      // 1. Wenn der Satz abgeschlossen ist -> nur noch den restlichen Teil senden
       if (isFinal) {
         processDelta(resIdx, currentTranscript, true);
         return;
       }
 
-      // 2. Prüfen, wie viele NEUE Wörter seit dem letzten Senden dazugekommen sind
       const alreadySentLen = sentCharOffsetByIndex.get(resIdx) || 0;
       const unsentPart = currentTranscript.slice(alreadySentLen).trim();
       const newWords = unsentPart ? unsentPart.split(/\s+/) : [];
 
-      // Sobald mindestens 10 neue Wörter vorliegen, dieses Teilstück abschicken
       if (newWords.length >= 10) {
-        // Nur bis zum letzten Leerzeichen schneiden, damit kein halbfertiges Wort gesendet wird
         const lastSpaceIndex = currentTranscript.lastIndexOf(' ');
         if (lastSpaceIndex > alreadySentLen) {
           const safeSlice = currentTranscript.slice(0, lastSpaceIndex);
@@ -367,7 +339,6 @@
         return;
       }
 
-      // 3. Bei einer Sprechpause von 1,1 Sek. den noch ungesendeten Rest abschicken
       silenceTimer = setTimeout(() => {
         if (unsentPart.length > 1) {
           processDelta(resIdx, currentTranscript, false);
@@ -456,125 +427,85 @@
     return '[Fehler: Übersetzungsdienst kurz überlastet]';
   }
 
-  function broadcastToStudents(payload) {
-    for (let conn of connections.values()) {
-      if (conn.open) {
-        conn.send(payload);
-      }
-    }
-  }
-
   // ==========================================
-  // 4. SCHÜLER (EMPFÄNGER) MIT NAHTLOSER AUSGABE
+  // 4. SCHÜLER (EMPFÄNGER) ÜBER MQTT
   // ==========================================
   function initReceiver(hostRoomId) {
-    currentHostId = hostRoomId;
+    roomTopic = `live-kurs-uebersetzer/${hostRoomId}`;
     document.getElementById('view-start').classList.add('hidden');
     document.getElementById('view-receiver').classList.remove('hidden');
 
-    startReceiverPeer();
+    connectReceiverMqtt();
   }
 
-  function startReceiverPeer() {
-    if (peer && !peer.destroyed) {
-      peer.destroy();
-    }
-
-    peer = new Peer(peerConfig);
-
-    peer.on('open', () => {
-      connectToHost(currentHostId);
-    });
-
-    peer.on('error', (err) => {
-      const statusEl = document.getElementById('receiver-status');
-      if (err.type === 'peer-unavailable') {
-        statusEl.textContent = '⏳ Kursleiter noch nicht bereit – suche erneut...';
-      } else {
-        statusEl.textContent = '⚠️ Netz-Verzögerung – verbinde neu...';
-      }
-      statusEl.className = 'status-badge status-warn';
-
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(() => {
-        if (peer && !peer.destroyed && !peer.disconnected) {
-          connectToHost(currentHostId);
-        } else {
-          startReceiverPeer();
-        }
-      }, 2500);
-    });
-
-    peer.on('disconnected', () => {
-      setTimeout(() => {
-        if (peer && !peer.destroyed) peer.reconnect();
-      }, 1500);
-    });
-  }
-
-  function manualReconnect() {
-    clearTimeout(reconnectTimer);
-    startReceiverPeer();
-  }
-
-  function connectToHost(hostRoomId) {
-    clearTimeout(reconnectTimer);
-    if (currentConn) {
-      try { currentConn.close(); } catch (e) {}
+  function connectReceiverMqtt() {
+    if (mqttClient) {
+      try { mqttClient.end(true); } catch (e) {}
     }
 
     const statusEl = document.getElementById('receiver-status');
-    statusEl.textContent = 'Verbinde mit Kursleiter...';
+    statusEl.textContent = 'Verbinde mit Kurs-Kanal...';
     statusEl.className = 'status-badge status-warn';
 
-    const conn = peer.connect(hostRoomId, { reliable: true, serialization: 'json' });
-    currentConn = conn;
+    mqttClient = mqtt.connect(MQTT_BROKER_URL, {
+      clientId: myClientId,
+      clean: true,
+      reconnectPeriod: 2000
+    });
 
-    const connectionTimeout = setTimeout(() => {
-      if (!conn.open) {
-        connectToHost(hostRoomId);
-      }
-    }, 5000);
-
-    conn.on('open', () => {
-      clearTimeout(connectionTimeout);
-      statusEl.textContent = '✅ Verbunden';
+    mqttClient.on('connect', () => {
+      statusEl.textContent = '✅ Mit Kurs-Kanal verbunden';
       statusEl.className = 'status-badge status-active';
 
-      const pingInterval = setInterval(() => {
-        if (conn.open) conn.send({ type: 'ping' });
-        else clearInterval(pingInterval);
-      }, 4000);
+      mqttClient.subscribe(`${roomTopic}/stream`);
+
+      // Sofort Präsenz melden und alle 4 Sekunden wiederholen
+      sendPresence();
     });
 
-    conn.on('data', (data) => {
-      if (data.type === 'welcome') {
-        document.getElementById('receiver-it').textContent = data.it;
-        document.getElementById('receiver-de').textContent = data.de;
-      } else if (data.type === 'translation') {
-        const itBox = document.getElementById('receiver-it');
-        document.getElementById('receiver-de').textContent = data.de;
+    mqttClient.on('reconnect', () => {
+      statusEl.textContent = '⚠️ Verbinde neu...';
+      statusEl.className = 'status-badge status-warn';
+    });
 
-        // Bei neuem Satz Display-Box neu starten, sonst laufenden Satz auf dem Display ergänzen
-        if (data.isNewSentence || itBox.textContent === 'Warte auf Kursleiter...' || itBox.textContent === 'Connesso!') {
-          itBox.textContent = data.itChunk;
-        } else {
-          itBox.textContent += ' ' + data.itChunk;
-        }
+    mqttClient.on('message', (topic, message) => {
+      if (topic === `${roomTopic}/stream`) {
+        try {
+          const data = JSON.parse(message.toString());
+          if (data.type === 'welcome') {
+            document.getElementById('receiver-it').textContent = data.it;
+            document.getElementById('receiver-de').textContent = data.de;
+          } else if (data.type === 'translation') {
+            const itBox = document.getElementById('receiver-it');
+            document.getElementById('receiver-de').textContent = data.de;
 
-        // Nur das neue Teilstück vorlesen (ohne laufende Sprache abzubrechen)
-        if (audioUnlocked) {
-          speakItalian(data.itChunk);
-        }
+            if (data.isNewSentence || itBox.textContent === 'Warte auf Kursleiter...' || itBox.textContent === 'Connesso!') {
+              itBox.textContent = data.itChunk;
+            } else {
+              itBox.textContent += ' ' + data.itChunk;
+            }
+
+            if (audioUnlocked) {
+              speakItalian(data.itChunk);
+            }
+          }
+        } catch (e) {}
       }
     });
+  }
 
-    conn.on('close', () => {
-      clearTimeout(connectionTimeout);
-      statusEl.textContent = '⚠️ Verbindung unterbrochen – suche neu...';
-      statusEl.className = 'status-badge status-warn';
-      reconnectTimer = setTimeout(() => connectToHost(hostRoomId), 2000);
-    });
+  function sendPresence() {
+    if (mqttClient && mqttClient.connected) {
+      mqttClient.publish(`${roomTopic}/presence`, JSON.stringify({ studentId: myClientId }));
+    }
+  }
+
+  setInterval(() => {
+    if (roomParam) sendPresence();
+  }, 4000);
+
+  function manualReconnect() {
+    connectReceiverMqtt();
   }
 
   function unlockReceiverAudio() {
@@ -590,7 +521,6 @@
   }
 
   function speakItalian(text) {
-    // Kein cancel() mehr – neue Teilstücke werden sauber hintereinander vorgelesen
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'it-IT';
     utterance.rate = 1.12;
