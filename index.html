@@ -66,7 +66,7 @@
     <div class="text-label">Erkanntes Deutsch:</div>
     <div id="sender-de" class="text-box" style="min-height: 70px; color: #cbd5e1;">...</div>
 
-    <div class="text-label">Gesendetes Italienisch:</div>
+    <div class="text-label">Gesendetes Italienisch (aktuelles Segment):</div>
     <div id="sender-it" class="text-box" style="min-height: 70px; color: #38bdf8;">...</div>
   </div>
 
@@ -100,11 +100,12 @@
   let activeAudioStream = null;
 
   let silenceTimer = null;
-  let lastSentNormalized = '';
-  let currentBufferNormalized = '';
   let currentHostId = null;
   let currentConn = null;
   let reconnectTimer = null;
+
+  // Merkt sich pro SpeechRecognition-Index, wie viele Zeichen bereits übersetzt/gesendet wurden
+  let sentCharOffsetByIndex = new Map();
 
   const peerConfig = {
     debug: 0,
@@ -190,7 +191,7 @@
   }
 
   // ==========================================
-  // 3. KURSLEITER (SENDER) OHNE DOPPEL-AUSGABE
+  // 3. KURSLEITER (SENDER) MIT DELTA-STREAMING
   // ==========================================
   function initSender() {
     document.getElementById('view-start').classList.add('hidden');
@@ -282,27 +283,43 @@
     countEl.classList.toggle('status-active', count > 0);
   }
 
-  // Entfernt Satzzeichen & Groß/Kleinschreibung, um identische Sätze sicher zu erkennen
-  function normalizeText(str) {
-    return str.toLowerCase().replace(/[.,!?;:"'„“\-–—\s]+/g, '');
-  }
+  // Extrahiert nur den NEU hinzugekommenen Teil eines laufenden Satzes
+  async function processDelta(resultIndex, fullText, isFinal) {
+    const alreadySentLen = sentCharOffsetByIndex.get(resultIndex) || 0;
 
-  async function flushAndTranslate(textToProcess) {
-    const cleanText = textToProcess.trim();
-    const norm = normalizeText(cleanText);
+    // Falls der Browser den Text rückwirkend leicht korrigiert hat und kürzer wurde
+    if (fullText.length <= alreadySentLen) {
+      if (isFinal) sentCharOffsetByIndex.delete(resultIndex);
+      return;
+    }
 
-    // Blockiert leere Texte und verhindert zuverlässig doppeltes Senden am Satzende
-    if (!norm || norm === lastSentNormalized) return;
+    // Nur den noch nicht gesendeten Rest abschneiden
+    let newChunk = fullText.slice(alreadySentLen).trim();
 
-    lastSentNormalized = norm;
-    clearTimeout(silenceTimer);
-    document.getElementById('sender-it').textContent = 'Übersetze...';
+    // Wenn es nur noch ein einzelnes Satzzeichen am Ende ist (z. B. "."), ignorieren
+    const cleanCheck = newChunk.replace(/[.,!?;:"'„“\-–—\s]+/g, '');
+    if (!cleanCheck) {
+      if (isFinal) sentCharOffsetByIndex.delete(resultIndex);
+      return;
+    }
 
-    const italianText = await translateText(cleanText);
-    document.getElementById('sender-it').textContent = italianText;
+    // Sofort neuen Offset speichern, damit dieser Teil kein zweites Mal gesendet wird
+    sentCharOffsetByIndex.set(resultIndex, fullText.length);
+    if (isFinal) {
+      sentCharOffsetByIndex.delete(resultIndex);
+    }
 
-    if (!italianText.startsWith('[Fehler:')) {
-      broadcastToStudents({ type: 'translation', de: cleanText, it: italianText });
+    document.getElementById('sender-it').textContent = 'Übersetze: "' + newChunk + '"...';
+    const italianChunk = await translateText(newChunk);
+    document.getElementById('sender-it').textContent = italianChunk;
+
+    if (!italianChunk.startsWith('[Fehler:')) {
+      broadcastToStudents({
+        type: 'translation',
+        de: fullText.trim(),
+        itChunk: italianChunk,
+        isNewSentence: alreadySentLen === 0
+      });
     }
   }
 
@@ -320,43 +337,46 @@
 
     recognition.onresult = (event) => {
       clearTimeout(silenceTimer);
-      let interimTranscript = '';
-      let finalTranscript = '';
 
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript;
-        } else {
-          interimTranscript += event.results[i][0].transcript;
+      const resIdx = event.resultIndex;
+      const result = event.results[resIdx];
+      const currentTranscript = result[0].transcript;
+      const isFinal = result.isFinal;
+
+      document.getElementById('sender-de').textContent = currentTranscript;
+
+      // 1. Wenn der Satz abgeschlossen ist -> nur noch den restlichen Teil senden
+      if (isFinal) {
+        processDelta(resIdx, currentTranscript, true);
+        return;
+      }
+
+      // 2. Prüfen, wie viele NEUE Wörter seit dem letzten Senden dazugekommen sind
+      const alreadySentLen = sentCharOffsetByIndex.get(resIdx) || 0;
+      const unsentPart = currentTranscript.slice(alreadySentLen).trim();
+      const newWords = unsentPart ? unsentPart.split(/\s+/) : [];
+
+      // Sobald mindestens 10 neue Wörter vorliegen, dieses Teilstück abschicken
+      if (newWords.length >= 10) {
+        // Nur bis zum letzten Leerzeichen schneiden, damit kein halbfertiges Wort gesendet wird
+        const lastSpaceIndex = currentTranscript.lastIndexOf(' ');
+        if (lastSpaceIndex > alreadySentLen) {
+          const safeSlice = currentTranscript.slice(0, lastSpaceIndex);
+          processDelta(resIdx, safeSlice, false);
         }
-      }
-
-      const activeText = (finalTranscript || interimTranscript).trim();
-      document.getElementById('sender-de').textContent = activeText;
-
-      if (finalTranscript.trim().length > 0) {
-        flushAndTranslate(finalTranscript);
-        currentBufferNormalized = '';
         return;
       }
 
-      const normActive = normalizeText(activeText);
-      const words = activeText.split(/\s+/);
-
-      if (words.length >= 12 && normActive !== currentBufferNormalized) {
-        currentBufferNormalized = normActive;
-        flushAndTranslate(activeText);
-        return;
-      }
-
+      // 3. Bei einer Sprechpause von 1,1 Sek. den noch ungesendeten Rest abschicken
       silenceTimer = setTimeout(() => {
-        if (activeText.length > 2) {
-          flushAndTranslate(activeText);
+        if (unsentPart.length > 1) {
+          processDelta(resIdx, currentTranscript, false);
         }
       }, 1100);
     };
 
     recognition.onend = () => {
+      sentCharOffsetByIndex.clear();
       if (isRecording) {
         try { recognition.start(); } catch (e) {}
       }
@@ -385,6 +405,7 @@
           activeAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         }
 
+        sentCharOffsetByIndex.clear();
         recognition.start();
         isRecording = true;
         btn.textContent = '⏹️ Mikrofon stoppen (Läuft...)';
@@ -444,7 +465,7 @@
   }
 
   // ==========================================
-  // 4. SCHÜLER (EMPFÄNGER)
+  // 4. SCHÜLER (EMPFÄNGER) MIT NAHTLOSER AUSGABE
   // ==========================================
   function initReceiver(hostRoomId) {
     currentHostId = hostRoomId;
@@ -527,11 +548,23 @@
     });
 
     conn.on('data', (data) => {
-      if (data.type === 'welcome' || data.type === 'translation') {
+      if (data.type === 'welcome') {
         document.getElementById('receiver-it').textContent = data.it;
         document.getElementById('receiver-de').textContent = data.de;
-        if (data.type === 'translation' && audioUnlocked) {
-          speakItalian(data.it);
+      } else if (data.type === 'translation') {
+        const itBox = document.getElementById('receiver-it');
+        document.getElementById('receiver-de').textContent = data.de;
+
+        // Bei neuem Satz Display-Box neu starten, sonst laufenden Satz auf dem Display ergänzen
+        if (data.isNewSentence || itBox.textContent === 'Warte auf Kursleiter...' || itBox.textContent === 'Connesso!') {
+          itBox.textContent = data.itChunk;
+        } else {
+          itBox.textContent += ' ' + data.itChunk;
+        }
+
+        // Nur das neue Teilstück vorlesen (ohne laufende Sprache abzubrechen)
+        if (audioUnlocked) {
+          speakItalian(data.itChunk);
         }
       }
     });
@@ -557,12 +590,10 @@
   }
 
   function speakItalian(text) {
-    if (window.speechSynthesis.pending) {
-      window.speechSynthesis.cancel();
-    }
+    // Kein cancel() mehr – neue Teilstücke werden sauber hintereinander vorgelesen
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'it-IT';
-    utterance.rate = 1.15;
+    utterance.rate = 1.12;
     window.speechSynthesis.speak(utterance);
   }
 </script>
