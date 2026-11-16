@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Kurs Live-Übersetzer (DE → IT)</title>
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -15,6 +15,7 @@
     .btn-primary { background: #0284c7; color: white; }
     .btn-danger { background: #dc2626; color: white; }
     .btn-success { background: #16a34a; color: white; }
+    .btn-secondary { background: #334155; color: #e2e8f0; font-size: 0.95rem; padding: 12px; }
     .hidden { display: none !important; }
     #qrcode { background: white; padding: 16px; border-radius: 12px; display: inline-block; margin: 16px auto; }
     .qr-wrapper { text-align: center; }
@@ -44,7 +45,7 @@
   <!-- KURSLEITER-ANSICHT (SENDER) -->
   <div id="view-sender" class="hidden">
     <div style="text-align: center;">
-      <span id="sender-status" class="status-badge">Erstelle Raum...</span>
+      <span id="sender-status" class="status-badge status-warn">Erstelle Raum...</span>
       <span id="connected-count" class="status-badge">Schüler: 0</span>
     </div>
 
@@ -83,6 +84,8 @@
 
       <div class="text-label">Original (Deutsch):</div>
       <div id="receiver-de" class="text-box" style="min-height: 60px; font-size: 0.95rem; color: #94a3b8;">...</div>
+
+      <button class="btn btn-secondary" onclick="manualReconnect()">🔄 Verbindung neu aufbauen</button>
     </div>
   </div>
 </div>
@@ -96,17 +99,21 @@
   let audioUnlocked = false;
   let activeAudioStream = null;
 
-  // Variablen für Turbo-Modus (Teilsatz-Übertragung)
   let silenceTimer = null;
   let lastSentText = '';
   let currentBuffer = '';
+  let currentHostId = null;
+  let currentConn = null;
+  let reconnectTimer = null;
 
   const peerConfig = {
     debug: 0,
     config: {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' }
       ]
     }
   };
@@ -130,8 +137,11 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (wakeLock !== null && document.visibilityState === 'visible') {
+    if (document.visibilityState === 'visible') {
       requestWakeLock();
+      if (peer && peer.disconnected && !peer.destroyed) {
+        peer.reconnect();
+      }
     }
   });
 
@@ -180,7 +190,7 @@
   }
 
   // ==========================================
-  // 3. KURSLEITER (SENDER) MIT TURBO-STREAMING
+  // 3. KURSLEITER (SENDER)
   // ==========================================
   function initSender() {
     document.getElementById('view-start').classList.add('hidden');
@@ -188,20 +198,48 @@
     requestWakeLock();
 
     const roomId = 'kurs-' + Math.random().toString(36).substring(2, 8);
+    createSenderPeer(roomId, true);
+
+    setupSpeechRecognition();
+    loadAndSelectBestMicrophone();
+  }
+
+  function createSenderPeer(roomId, generateQr) {
     peer = new Peer(roomId, peerConfig);
 
     peer.on('open', (id) => {
       const statusEl = document.getElementById('sender-status');
       statusEl.textContent = 'Raum aktiv';
-      statusEl.classList.add('status-active');
+      statusEl.className = 'status-badge status-active';
       document.getElementById('room-code-display').textContent = 'Raum-ID: ' + id;
 
-      const joinUrl = `${window.location.origin}${window.location.pathname}?room=${id}`;
-      new QRCode(document.getElementById('qrcode'), {
-        text: joinUrl,
-        width: 180,
-        height: 180
-      });
+      if (generateQr) {
+        const qrContainer = document.getElementById('qrcode');
+        qrContainer.innerHTML = '';
+        const joinUrl = `${window.location.origin}${window.location.pathname}?room=${id}`;
+        new QRCode(qrContainer, {
+          text: joinUrl,
+          width: 180,
+          height: 180
+        });
+      }
+    });
+
+    peer.on('disconnected', () => {
+      const statusEl = document.getElementById('sender-status');
+      statusEl.textContent = 'Verbinde Raum neu...';
+      statusEl.className = 'status-badge status-warn';
+      setTimeout(() => {
+        if (peer && !peer.destroyed) peer.reconnect();
+      }, 1500);
+    });
+
+    peer.on('error', (err) => {
+      if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
+        setTimeout(() => {
+          if (peer && !peer.destroyed) peer.reconnect();
+        }, 2000);
+      }
     });
 
     peer.on('connection', (conn) => {
@@ -235,9 +273,6 @@
       }
       updateStudentCount();
     }, 5000);
-
-    setupSpeechRecognition();
-    loadAndSelectBestMicrophone();
   }
 
   function updateStudentCount() {
@@ -247,15 +282,20 @@
     countEl.classList.toggle('status-active', count > 0);
   }
 
-  // Sendet den erkannten Text sofort ab, ohne ewig auf Satzende zu warten
   async function flushAndTranslate(textToProcess) {
     const cleanText = textToProcess.trim();
     if (!cleanText || cleanText === lastSentText) return;
 
     lastSentText = cleanText;
+    document.getElementById('sender-it').textContent = 'Übersetze...';
+
     const italianText = await translateText(cleanText);
     document.getElementById('sender-it').textContent = italianText;
-    broadcastToStudents({ type: 'translation', de: cleanText, it: italianText });
+
+    // Nur an Schüler senden, wenn die Übersetzung erfolgreich war
+    if (!italianText.startsWith('[Fehler:')) {
+      broadcastToStudents({ type: 'translation', de: cleanText, it: italianText });
+    }
   }
 
   function setupSpeechRecognition() {
@@ -286,26 +326,25 @@
       const activeText = (finalTranscript || interimTranscript).trim();
       document.getElementById('sender-de').textContent = activeText;
 
-      // 1. Wenn der Browser den Satz beendet hat -> sofort senden
       if (finalTranscript.trim().length > 0) {
         flushAndTranslate(finalTranscript);
         currentBuffer = '';
         return;
       }
 
-      // 2. Turbo-Trigger: Wenn schon mindestens 8 Wörter gesprochen wurden -> Teilsatz sofort senden
+      // Bei längeren Sätzen nach 12 Wörtern einen Zwischenstand übersetzen
       const words = activeText.split(/\s+/);
-      if (words.length >= 8 && activeText !== currentBuffer) {
+      if (words.length >= 12 && activeText !== currentBuffer) {
         currentBuffer = activeText;
         flushAndTranslate(activeText);
       }
 
-      // 3. Mikropausen-Trigger: Nach nur 650 ms Sprechpause sofort übersetzen
+      // Nach 1,1 Sekunden Sprechpause übersetzen
       silenceTimer = setTimeout(() => {
         if (activeText.length > 2) {
           flushAndTranslate(activeText);
         }
-      }, 650);
+      }, 1100);
     };
 
     recognition.onend = () => {
@@ -360,15 +399,39 @@
     }
   }
 
+  // ZWEISTUFIGE ÜBERSETZUNG: 1. MyMemory API (offiziell & CORS-sicher), 2. Google GTX als Backup
   async function translateText(text) {
+    // Versuch 1: Offizielle MyMemory API (DE -> IT)
     try {
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=de&tl=it&dt=t&q=${encodeURIComponent(text)}`;
-      const response = await fetch(url);
-      const data = await response.json();
-      return data[0].map(item => item[0]).join('');
-    } catch (error) {
-      return text;
+      const mmUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=de|it`;
+      const mmResponse = await fetch(mmUrl);
+      if (mmResponse.ok) {
+        const mmData = await mmResponse.json();
+        if (mmData && mmData.responseData && mmData.responseData.translatedText) {
+          const translated = mmData.responseData.translatedText;
+          // Prüfen, ob MyMemory kein Limit-Warnhinweis zurückgibt
+          if (!translated.includes('MYMEMORY WARNING')) {
+            return translated;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('MyMemory Fallback aktiv:', e);
     }
+
+    // Versuch 2: Google GTX Endpunkt als Backup
+    try {
+      const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=de&tl=it&dt=t&q=${encodeURIComponent(text)}`;
+      const gtxResponse = await fetch(gtxUrl);
+      if (gtxResponse.ok) {
+        const gtxData = await gtxResponse.json();
+        return gtxData[0].map(item => item[0]).join('');
+      }
+    } catch (e) {
+      console.warn('Google GTX ebenfalls blockiert:', e);
+    }
+
+    return '[Fehler: Übersetzungsdienst kurz überlastet]';
   }
 
   function broadcastToStudents(payload) {
@@ -380,24 +443,79 @@
   }
 
   // ==========================================
-  // 4. SCHÜLER (EMPFÄNGER) OHNE WARTESCHLANGE
+  // 4. SCHÜLER (EMPFÄNGER)
   // ==========================================
   function initReceiver(hostRoomId) {
+    currentHostId = hostRoomId;
     document.getElementById('view-start').classList.add('hidden');
     document.getElementById('view-receiver').classList.remove('hidden');
 
+    startReceiverPeer();
+  }
+
+  function startReceiverPeer() {
+    if (peer && !peer.destroyed) {
+      peer.destroy();
+    }
+
     peer = new Peer(peerConfig);
-    peer.on('open', () => connectToHost(hostRoomId));
+
+    peer.on('open', () => {
+      connectToHost(currentHostId);
+    });
+
+    peer.on('error', (err) => {
+      const statusEl = document.getElementById('receiver-status');
+      if (err.type === 'peer-unavailable') {
+        statusEl.textContent = '⏳ Kursleiter noch nicht bereit – suche erneut...';
+      } else {
+        statusEl.textContent = '⚠️ Netz-Verzögerung – verbinde neu...';
+      }
+      statusEl.className = 'status-badge status-warn';
+
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        if (peer && !peer.destroyed && !peer.disconnected) {
+          connectToHost(currentHostId);
+        } else {
+          startReceiverPeer();
+        }
+      }, 2500);
+    });
+
+    peer.on('disconnected', () => {
+      setTimeout(() => {
+        if (peer && !peer.destroyed) peer.reconnect();
+      }, 1500);
+    });
+  }
+
+  function manualReconnect() {
+    clearTimeout(reconnectTimer);
+    startReceiverPeer();
   }
 
   function connectToHost(hostRoomId) {
+    clearTimeout(reconnectTimer);
+    if (currentConn) {
+      try { currentConn.close(); } catch (e) {}
+    }
+
     const statusEl = document.getElementById('receiver-status');
     statusEl.textContent = 'Verbinde mit Kursleiter...';
     statusEl.className = 'status-badge status-warn';
 
     const conn = peer.connect(hostRoomId, { reliable: true, serialization: 'json' });
+    currentConn = conn;
+
+    const connectionTimeout = setTimeout(() => {
+      if (!conn.open) {
+        connectToHost(hostRoomId);
+      }
+    }, 5000);
 
     conn.on('open', () => {
+      clearTimeout(connectionTimeout);
       statusEl.textContent = '✅ Verbunden';
       statusEl.className = 'status-badge status-active';
 
@@ -418,13 +536,10 @@
     });
 
     conn.on('close', () => {
-      statusEl.textContent = '⚠️ Verbinde neu...';
+      clearTimeout(connectionTimeout);
+      statusEl.textContent = '⚠️ Verbindung unterbrochen – suche neu...';
       statusEl.className = 'status-badge status-warn';
-      setTimeout(() => connectToHost(hostRoomId), 2000);
-    });
-
-    conn.on('error', () => {
-      setTimeout(() => connectToHost(hostRoomId), 2000);
+      reconnectTimer = setTimeout(() => connectToHost(hostRoomId), 2000);
     });
   }
 
@@ -441,13 +556,12 @@
   }
 
   function speakItalian(text) {
-    // Verhindert lange Warteschlangen, falls mehr als 2 Sätze hängen
     if (window.speechSynthesis.pending) {
       window.speechSynthesis.cancel();
     }
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'it-IT';
-    utterance.rate = 1.15; // Zügiges, natürliches Live-Tempo
+    utterance.rate = 1.15;
     window.speechSynthesis.speak(utterance);
   }
 </script>
