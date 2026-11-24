@@ -3,37 +3,41 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Kurs Live-Übersetzer (DE → IT)</title>
+  <title>Kurs Live-Übersetzer Schreinerhandwerk (DE → IT)</title>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { margin: 0; padding: 20px; background: #0f172a; color: #f8fafc; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
-    .container { width: 100%; max-width: 500px; background: #1e293b; padding: 24px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+    .container { width: 100%; max-width: 540px; background: #1e293b; padding: 24px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
     h1 { font-size: 1.4rem; margin-top: 0; text-align: center; color: #38bdf8; }
     .btn { width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 1.1rem; font-weight: bold; cursor: pointer; margin-top: 12px; transition: 0.2s; }
     .btn-primary { background: #0284c7; color: white; }
     .btn-danger { background: #dc2626; color: white; }
     .btn-success { background: #16a34a; color: white; }
     .btn-secondary { background: #334155; color: #e2e8f0; font-size: 0.95rem; padding: 12px; }
+    .btn-small { padding: 10px; font-size: 0.9rem; margin-top: 8px; }
     .hidden { display: none !important; }
     #qrcode { background: white; padding: 16px; border-radius: 12px; display: inline-block; margin: 16px auto; }
     .qr-wrapper { text-align: center; }
     .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; background: #334155; margin: 4px; }
     .status-active { background: #15803d; color: #dcfce7; }
     .status-warn { background: #b45309; color: #fef3c7; }
-    .text-box { background: #0f172a; padding: 16px; border-radius: 12px; min-height: 120px; margin-top: 12px; font-size: 1.15rem; line-height: 1.5; border: 1px solid #334155; }
+    .text-box { background: #0f172a; padding: 16px; border-radius: 12px; min-height: 110px; margin-top: 12px; font-size: 1.15rem; line-height: 1.5; border: 1px solid #334155; }
     .text-label { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 16px; }
     .hint { font-size: 0.85rem; color: #94a3b8; text-align: center; margin-top: 12px; }
-    select, input[type="text"] { width: 100%; padding: 12px; border-radius: 8px; background: #0f172a; color: #f8fafc; border: 1px solid #334155; font-size: 1rem; }
-    input[type="text"]:focus { outline: none; border-color: #38bdf8; }
+    select, input[type="text"], textarea { width: 100%; padding: 12px; border-radius: 8px; background: #0f172a; color: #f8fafc; border: 1px solid #334155; font-size: 0.95rem; }
+    input[type="text"]:focus, textarea:focus { outline: none; border-color: #38bdf8; }
     .reconnect-box { margin-top: 24px; padding-top: 16px; border-top: 1px solid #334155; }
+    details { margin-top: 20px; background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 12px; }
+    summary { cursor: pointer; font-weight: bold; color: #38bdf8; font-size: 0.95rem; user-select: none; }
+    textarea { font-family: monospace; font-size: 0.82rem; line-height: 1.4; margin-top: 10px; resize: vertical; }
   </style>
 </head>
 <body>
 
 <div class="container">
-  <h1>🎙️ Kurs Live-Übersetzer</h1>
+  <h1>🪚 Kurs Live-Übersetzer Schreiner</h1>
 
   <!-- STARTANSICHT -->
   <div id="view-start">
@@ -67,11 +71,25 @@
 
     <button id="btn-mic" class="btn btn-success" onclick="toggleMic()">🎤 Mikrofon starten</button>
 
-    <div class="text-label">Erkanntes Deutsch:</div>
+    <div class="text-label">Erkanntes Deutsch (mit Fachbegriff-Korrektur):</div>
     <div id="sender-de" class="text-box" style="min-height: 70px; color: #cbd5e1;">...</div>
 
     <div class="text-label">Gesendetes Italienisch (aktuelles Segment):</div>
     <div id="sender-it" class="text-box" style="min-height: 70px; color: #38bdf8;">...</div>
+
+    <!-- AUSKLAPPBARES SCHREINER-GLOSSAR -->
+    <details>
+      <summary>📚 Schreiner-Glossar & Fachbegriffe (<span id="glossary-count">0</span> Begriffe)</summary>
+      <p class="hint" style="text-align: left; margin-top: 8px; font-size: 0.8rem;">
+        Format pro Zeile:<br>
+        <code>hörfehler1, hörfehler2 -> Korrektes Deutsch = Italienisch</code>
+      </p>
+      <textarea id="glossary-editor" rows="10"></textarea>
+      <div style="display: flex; gap: 8px;">
+        <button class="btn btn-success btn-small" onclick="saveGlossaryFromEditor()">💾 Glossar speichern</button>
+        <button class="btn btn-secondary btn-small" onclick="resetGlossaryToDefault()">↺ Standard wiederherstellen</button>
+      </div>
+    </details>
   </div>
 
   <!-- SCHÜLER-ANSICHT (EMPFÄNGER) -->
@@ -100,6 +118,184 @@
 </div>
 
 <script>
+  // ==========================================
+  // 0. STANDARD-GLOSSAR SCHREINERHANDWERK
+  // ==========================================
+  const DEFAULT_GLOSSARY_TEXT = `
+tisch kreis säge, tischkriessäge, tischkreissägen -> Tischkreissäge = sega da tavolo
+format kreis säge -> Formatkreissäge = squadratrice
+band säge -> Bandsäge = sega a nastro
+kapp säge, gehrungs säge -> Kappsäge = troncatrice
+hand kreis säge -> Handkreissäge = sega circolare manuale
+tauch säge -> Tauchsäge = sega ad affondamento
+stich säge -> Stichsäge = seghetto alternativo
+abricht hobelmaschine, abricht hobel, abrichte -> Abrichthobelmaschine = pialla a filo
+dicken hobelmaschine, dicken hobel, dickenhobel -> Dickenhobelmaschine = pialla a spessore
+tisch fräse, kehlmaschine, kehl maschine -> Tischfräse = toupie
+ober fräse -> Oberfräse = fresatrice verticale
+lamello fräse, flachdübel fräse, lamello -> Flachdübelfräse = fresatrice per lamelli
+kanten anleim maschine -> Kantenanleimmaschine = bordatrice
+exzenter schleifer -> Exzenterschleifer = levigatrice rotorbitale
+band schleifer, breitband schleifer -> Bandschleifer = levigatrice a nastro
+ständer bohrmaschine -> Ständerbohrmaschine = trapano a colonna
+akku schrauber -> Akkuschrauber = avvitatore a batteria
+absaug anlage -> Absauganlage = impianto di aspirazione
+cnc bearbeitungszentrum, cnc maschine -> CNC-Bearbeitungszentrum = centro di lavoro CNC
+massiv holz, voll holz, vollholz -> Massivholz = legno massello
+eichen holz, eiche -> Eiche = rovere
+buchen holz, buche -> Buche = faggio
+fichten holz, fichte -> Fichte = abete rosso
+tannen holz, weißtanne -> Weißtanne = abete bianco
+lärchen holz, lärche -> Lärche = larice
+arven holz, zirbenholz, zirbe, arve -> Arve = pino cembro
+nuss baum, nussbaumholz, nussbaum -> Nussbaum = noce
+ahorn holz, ahorn -> Ahorn = acero
+eschen holz, esche -> Esche = frassino
+kiefern holz, föhre, kiefer -> Kiefer = pino
+sperr holz -> Sperrholz = compensato
+multiplex platte, multiplex -> Multiplexplatte = multistrato
+span platte -> Spanplatte = truciolare
+mdf platte, mdf -> MDF-Platte = pannello MDF
+drei schicht platte -> Dreischichtplatte = pannello a tre strati
+furnier holz, furnier -> Furnier = piallaccio
+roh holz, schnitt holz, rohholz -> Schnittholz = legname grezzo
+holz feuchte -> Holzfeuchte = umidità del legno
+maser richtung, maserung -> Maserrichtung = venatura del legno
+splint holz -> Splintholz = alburno
+kern holz -> Kernholz = durame
+ast loch -> Astloch = nodo del legno
+zu schnitt -> Zuschnitt = taglio a misura
+ab richten -> Abrichten = piallatura a filo
+hobeln, abhobeln -> Hobeln = piallatura
+fräsen, ausfräsen -> Fräsen = fresatura
+nuten, einnuten -> Nuten = scanalatura
+falzen, einfalzen -> Falzen = battuta
+fasen, anfasen -> Fasen = smusso
+auf gehrung, gehrung -> Gehrung = taglio a 45 gradi
+verleimen, zusammenleimen, leimen -> Verleimen = incollaggio
+weiß leim, holz leim, holzleim -> Weißleim = colla vinilica
+pu leim -> PU-Leim = colla poliuretanica
+schraub zwinge, zwingen, zwinge -> Schraubzwinge = morsetto
+leim presse, verpressen -> Leimpresse = pressatura
+holz dübel, dübel -> Holzdübel = spina di legno
+schlitz und zapfen -> Schlitz und Zapfen = tenone e mortasa
+zinken verbindung, schwalbenschwanz -> Zinkenverbindung = incastro a coda di rondine
+zwischen schliff -> Zwischenschliff = levigatura intermedia
+schleif papier -> Schleifpapier = carta vetrata
+oberflächen behandlung -> Oberflächenbehandlung = trattamento superficiale
+beizen, holzbeize -> Beizen = mordenzatura
+lackieren, klarlack -> Lackieren = verniciatura
+hartwachs öl, ölen -> Hartwachsöl = olio cera duro
+werk stück -> Werkstück = pezzo in lavorazione
+schrank korpus, korpus -> Korpus = scocca
+rück wand -> Rückwand = schienale
+schub lade -> Schublade = cassetto
+voll auszug -> Vollauszug = guida ad estrazione totale
+topf band, scharnier -> Topfband = cerniera a tazza
+möbel beschläge, beschläge -> Beschläge = ferramenta per mobili
+kanten band, umleimer -> Kantenband = bordo per mobili
+end montage, montage -> Montage = montaggio
+ins wasser stellen, ausrichten -> Ausrichten = mettere a livello
+distanz klotz, unterlegen -> Distanzklotz = spessore
+anreißen, anzeichnen -> Anreißen = tracciare
+wand montage -> Wandmontage = fissaggio a parete
+silikon fuge -> Silikonfuge = sigillatura con silicone
+pass blende -> Passblende = fascia di compensazione
+schatten fuge -> Schattenfuge = fuga d'ombra
+`.trim();
+
+  let glossaryEntries = [];
+
+  function escapeRegex(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function parseGlossaryText(rawText) {
+    const lines = rawText.split('\n');
+    const parsed = [];
+
+    lines.forEach(line => {
+      const cleanLine = line.trim();
+      if (!cleanLine || cleanLine.startsWith('#')) return;
+
+      const eqIndex = cleanLine.indexOf('=');
+      if (eqIndex === -1) return;
+
+      const leftPart = cleanLine.slice(0, eqIndex).trim();
+      const itTerm = cleanLine.slice(eqIndex + 1).trim();
+      if (!leftPart || !itTerm) return;
+
+      let deTerm = '';
+      let variants = [];
+
+      if (leftPart.includes('->')) {
+        const arrowParts = leftPart.split('->');
+        variants = arrowParts[0].split(',').map(s => s.trim()).filter(Boolean);
+        deTerm = arrowParts[1].trim();
+      } else {
+        deTerm = leftPart;
+        variants = [leftPart.toLowerCase()];
+      }
+
+      if (deTerm && itTerm) {
+        parsed.push({ variants, de: deTerm, it: itTerm });
+      }
+    });
+
+    glossaryEntries = parsed;
+    const countEl = document.getElementById('glossary-count');
+    if (countEl) countEl.textContent = glossaryEntries.length;
+  }
+
+  function initGlossary() {
+    const saved = localStorage.getItem('schreiner_glossary_v1');
+    const textToUse = saved || DEFAULT_GLOSSARY_TEXT;
+    const editor = document.getElementById('glossary-editor');
+    if (editor) editor.value = textToUse;
+    parseGlossaryText(textToUse);
+  }
+
+  function saveGlossaryFromEditor() {
+    const editor = document.getElementById('glossary-editor');
+    const text = editor.value.trim();
+    localStorage.setItem('schreiner_glossary_v1', text);
+    parseGlossaryText(text);
+    alert(`Glossar gespeichert (${glossaryEntries.length} Fachbegriffe aktiv).`);
+  }
+
+  function resetGlossaryToDefault() {
+    localStorage.removeItem('schreiner_glossary_v1');
+    const editor = document.getElementById('glossary-editor');
+    if (editor) editor.value = DEFAULT_GLOSSARY_TEXT;
+    parseGlossaryText(DEFAULT_GLOSSARY_TEXT);
+    alert('Standard-Schreinerglossar wurde wiederhergestellt.');
+  }
+
+  // Korrigiert Hörfehler der Spracherkennung im deutschen Text
+  function applyGermanGlossary(text) {
+    if (!text || glossaryEntries.length === 0) return text;
+    let corrected = text;
+
+    // Alle Varianten sammeln und nach Länge absteigend sortieren (längere Ausdrücke zuerst)
+    const allVariantPairs = [];
+    glossaryEntries.forEach(entry => {
+      entry.variants.forEach(v => {
+        allVariantPairs.push({ variant: v, de: entry.de });
+      });
+    });
+    allVariantPairs.sort((a, b) => b.variant.length - a.variant.length);
+
+    allVariantPairs.forEach(({ variant, de }) => {
+      const pattern = new RegExp(`(^|[\\s.,!?;:"'„“\\-–—(])(${escapeRegex(variant)})(?=$|[\\s.,!?;:"'„“\\-–—)])`, 'gi');
+      corrected = corrected.replace(pattern, `$1${de}`);
+    });
+
+    return corrected;
+  }
+
+  // ==========================================
+  // 1. MQTT & GLOBALE VARIABLEN
+  // ==========================================
   let mqttClient = null;
   let roomTopic = '';
   let activeRoomId = '';
@@ -113,11 +309,9 @@
   let silenceTimer = null;
   let sentCharOffsetByIndex = new Map();
 
-  // Ausgewogene Werte für flüssige Sprachmelodie ohne Stakkato
-  const WORDS_PER_CHUNK = 7;    // 7 Wörter ergeben eine natürliche Satzmelodie
-  const SILENCE_DELAY_MS = 700; // 700 ms Pause wartet kleine Denkpausen ab
+  const WORDS_PER_CHUNK = 7;
+  const SILENCE_DELAY_MS = 700;
 
-  // Puffer für flüssiges Zusammenfügen auf der Schüler-Seite
   let speechBuffer = [];
   let isSpeakingNow = false;
   let preferredItalianVoice = null;
@@ -132,12 +326,10 @@
     initReceiver(roomParam);
   }
 
-  // Beste verfügbare italienische Stimme im Browser suchen
   function loadBestItalianVoice() {
     const voices = window.speechSynthesis.getVoices();
     const itVoices = voices.filter(v => v.lang.toLowerCase().startsWith('it'));
     if (itVoices.length > 0) {
-      // Natürliche Stimmen (Google, Apple Alice/Elsa, Microsoft) bevorzugen
       preferredItalianVoice =
         itVoices.find(v => v.name.includes('Google') || v.name.includes('Alice') || v.name.includes('Elsa') || v.name.includes('Natural')) ||
         itVoices[0];
@@ -173,9 +365,6 @@
     initReceiver(targetRoom);
   }
 
-  // ==========================================
-  // 1. WAKE LOCK
-  // ==========================================
   async function requestWakeLock() {
     try {
       if ('wakeLock' in navigator) {
@@ -193,9 +382,6 @@
     }
   });
 
-  // ==========================================
-  // 2. MIKROFON-AUSWAHL
-  // ==========================================
   async function loadAndSelectBestMicrophone() {
     const selectEl = document.getElementById('mic-select');
     try {
@@ -238,13 +424,14 @@
   }
 
   // ==========================================
-  // 3. KURSLEITER (SENDER)
+  // 2. KURSLEITER (SENDER)
   // ==========================================
   function initSender() {
     isReceiverMode = false;
     document.getElementById('view-start').classList.add('hidden');
     document.getElementById('view-sender').classList.remove('hidden');
     requestWakeLock();
+    initGlossary();
 
     const roomId = 'kurs-' + Math.random().toString(36).substring(2, 8);
     activeRoomId = roomId;
@@ -342,8 +529,11 @@
       sentCharOffsetByIndex.delete(resultIndex);
     }
 
+    // Sicherheitshalber auch auf das ausgeschnittene Teilstück das deutsche Glossar anwenden
+    newChunk = applyGermanGlossary(newChunk);
+
     document.getElementById('sender-it').textContent = 'Übersetze: "' + newChunk + '"...';
-    const italianChunk = await translateText(newChunk);
+    const italianChunk = await translateWithGlossary(newChunk);
     document.getElementById('sender-it').textContent = italianChunk;
 
     if (!italianChunk.startsWith('[Fehler:')) {
@@ -373,7 +563,8 @@
 
       const resIdx = event.resultIndex;
       const result = event.results[resIdx];
-      const currentTranscript = result[0].transcript;
+      // Sofort deutsche Hörfehler (z. B. "tisch kreis säge" -> "Tischkreissäge") korrigieren
+      const currentTranscript = applyGermanGlossary(result[0].transcript);
       const isFinal = result.isFinal;
 
       document.getElementById('sender-de').textContent = currentTranscript;
@@ -457,7 +648,40 @@
     }
   }
 
-  async function translateText(text) {
+  // Übersetzt den Text und erzwingt dabei exakte italienische Fachbegriffe aus dem Glossar
+  async function translateWithGlossary(text) {
+    let maskedText = text;
+    const replacements = [];
+
+    // Längere Fachbegriffe zuerst ersetzen (z. B. "Formatkreissäge" vor "Kreissäge")
+    const sortedEntries = [...glossaryEntries].sort((a, b) => b.de.length - a.de.length);
+
+    sortedEntries.forEach((entry) => {
+      const token = `T9${replacements.length}X`;
+      const pattern = new RegExp(`(^|[\\s.,!?;:"'„“\\-–—(])(${escapeRegex(entry.de)})(?=$|[\\s.,!?;:"'„“\\-–—)])`, 'gi');
+      if (pattern.test(maskedText)) {
+        maskedText = maskedText.replace(pattern, `$1${token}`);
+        replacements.push({ token, it: entry.it });
+      }
+    });
+
+    let translated = await rawTranslateRequest(maskedText);
+    if (translated.startsWith('[Fehler:')) return translated;
+
+    // Platzhalter wieder durch die exakten italienischen Fachbegriffe ersetzen
+    replacements.forEach(({ token, it }) => {
+      const tokenPattern = new RegExp(token, 'gi');
+      translated = translated.replace(tokenPattern, it);
+    });
+
+    if (translated.length > 0) {
+      translated = translated.charAt(0).toUpperCase() + translated.slice(1);
+    }
+
+    return translated;
+  }
+
+  async function rawTranslateRequest(text) {
     try {
       const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=de&tl=it&dt=t&q=${encodeURIComponent(text)}`;
       const gtxResponse = await fetch(gtxUrl);
@@ -486,7 +710,7 @@
   }
 
   // ==========================================
-  // 4. SCHÜLER (EMPFÄNGER) MIT FLÜSSIGER SPRACHAUSGABE
+  // 3. SCHÜLER (EMPFÄNGER)
   // ==========================================
   function initReceiver(hostRoomId) {
     isReceiverMode = true;
@@ -599,7 +823,6 @@
     document.getElementById('receiver-content').classList.remove('hidden');
   }
 
-  // Klebt wartende Text-Schnipsel zu einem flüssigen Satz zusammen, statt jeden einzeln abzuhacken
   function enqueueAndSpeakItalian(text) {
     speechBuffer.push(text.trim());
     if (!isSpeakingNow) {
@@ -614,7 +837,6 @@
     }
 
     isSpeakingNow = true;
-    // Alle aktuell wartenden Häppchen zu einem einzigen flüssigen Satz verbinden
     const combinedText = speechBuffer.join(', ');
     speechBuffer = [];
 
@@ -623,7 +845,7 @@
     if (preferredItalianVoice) {
       utterance.voice = preferredItalianVoice;
     }
-    utterance.rate = 1.1; // Natürliches, flüssiges Tempo
+    utterance.rate = 1.1;
 
     utterance.onend = () => {
       processSpeechQueue();
